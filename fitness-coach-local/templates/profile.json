@@ -1,15 +1,11 @@
 {
-  "basic_info": {
-    "name": "",
-    "gender": "",
-    "age": null,
-    "height": null,
-    "health_conditions": []
-  },
-  "fitness_level": "beginner|intermediate|advanced",
-  "training_days_per_week": 3,
-  "diet_preference": "normal|vegetarian|keto|low_carb",
+  "name": "",
+  "member_id": "",
   "goal": "增肌|减脂|塑形",
+  "gender": "",
+  "age": null,
+  "height": null,
+  "style": "energetic|professional|gentle|strict",
   "meals": {
     "breakfast": null,
     "lunch": null,
@@ -18,9 +14,12 @@
   "reminder_freq": "每顿都提醒|只提醒午餐和晚餐|其他",
   "report_enabled": true,
   "weight_reminder": "none|daily|weekly",
-  "style": "energetic|professional|gentle|strict",
-  "notes": "",
-  "joined_at": "",
+  "memory": {
+    "habits": [],
+    "injuries": [],
+    "preferences": [],
+    "notes": []
+  },
   "cron_jobs": {
     "meal_breakfast": null,
     "meal_lunch": null,

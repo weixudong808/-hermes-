@@ -54,15 +54,7 @@ elif self.chat_type == "group":
 
 ## 文件位置
 
-- **本地：** `~/Hermes-Agent/gateway/session.py` — `SessionSource.description` 属性（第 103-107 行）← **已修改**
-- **云端：** `/usr/local/lib/hermes-agent/gateway/session.py` — 同一位置 ← **已修改**（v0.12.0 版本）
+- `gateway/session.py` — `SessionSource.description` 属性（第 94-113 行）← **已修改**
 - `gateway/session.py` — `build_session_context_prompt()` 函数（第 230+ 行）
 - `gateway/session.py` — `_PII_SAFE_PLATFORMS` 定义（第 194 行）
 - `gateway/session.py` — Delivery options origin 行（第 392 行）← 未改，暂不影响
-
-## 云端迁移注意
-
-- 云端代码路径是 `/usr/local/lib/hermes-agent/`（不是 `~/Hermes-Agent/`）
-- **不要直接 scp 本地 session.py 覆盖云端**（版本不同：本地 v0.11.0 vs 云端 v0.12.0）
-- 正确做法：`git checkout` 恢复云端原版 → 用 Python 脚本精确修改 → 验证缩进 → 重启 gateway
-- 详见 `references/cloud-deployment-pitfalls.md` 和 `~/.hermes/plans/session-py-chatid-patch.md`

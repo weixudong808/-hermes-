@@ -39,16 +39,22 @@ MEMBERS_DIR = os.path.join(HERMES_HOME, "members")
 GROUP_MAP_PATH = os.path.join(HERMES_HOME, "group_map.json")
 
 # ── lark-cli config ──────────────────────────────────────────────────────
-LARK_CLI = os.path.expanduser("~/.nvm/versions/node/v20.20.0/bin/lark-cli")
-# If lark-cli is elsewhere, set env var LARK_CLI_PATH
-LARK_CLI = os.environ.get("LARK_CLI_PATH", LARK_CLI)
+# Cloud: /usr/local/bin/lark-cli, Local: ~/.nvm/versions/node/v20.20.0/bin/lark-cli
+# Override via LARK_CLI_PATH env var
+# NOTE (2026-05-22): lark-cli now uses Hermes credentials (cli_a9789ef1a0b85cd5).
+# Setup: echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id cli_a9789ef1a0b85cd5 --app-secret-stdin --brand feishu
+# After changing credentials: rm -rf ~/.lark-cli/cache/
+LARK_CLI = os.environ.get("LARK_CLI_PATH", os.path.expanduser("~/.nvm/versions/node/v20.20.0/bin/lark-cli"))
 
 # Template bitable token (source to copy from)
 TEMPLATE_BASE_TOKEN = os.environ.get("BITABLE_TEMPLATE_TOKEN", "TGixbmcoEaiZ43sfXvQcZ513nnf")
+# Coach's cloud drive folder token for member archives
+# Set via env var; omit to create bitable in app default space
+COACH_FOLDER_TOKEN = os.environ.get("COACH_FOLDER_TOKEN", "")
 
 # Network retry config
-MAX_RETRIES = 3
-RETRY_DELAY = 3  # seconds
+MAX_RETRIES = 10
+RETRY_DELAY = 5  # seconds
 
 
 def fail(step, error):
@@ -93,15 +99,9 @@ def _is_network_error(msg):
 
 
 def name_to_member_id(name):
-    """Convert Chinese name to member_id (pinyin-ish, lowercase + underscores)."""
-    # Simple approach: use raw name if it looks like pinyin/english already
-    # For Chinese names, just use a sanitized version
-    # In production, this could use pypinyin for proper pinyin conversion
+    """Convert name to member_id (pinyin-ish, lowercase + underscores)."""
     safe = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]', '', name)
-    # For now, if it contains Chinese characters, use a transliteration-friendly format
     if re.search(r'[\u4e00-\u9fff]', safe):
-        # Fallback: use hex hash of the name for Chinese characters
-        # This avoids dependency on pypinyin library
         h = hex(hash(name) & 0xFFFFFFFF)[2:]
         return f"member_{h}"
     return safe.lower().replace(" ", "_")
@@ -193,13 +193,16 @@ def main():
     os.makedirs(summaries_dir, exist_ok=True)
 
     # ── 4. Copy bitable from template ────────────────────────────────────
-    stdout, stderr = run_lark([
+    # NOTE: Do NOT use --as user (blocked by strict_mode bot-only).
+    # Bot identity works for base:app:copy when the bot app has the permission.
+    copy_args = [
         "base", "+base-copy",
         "--base-token", TEMPLATE_BASE_TOKEN,
         "--name", f"{name}的健身档案",
-        "--time-zone", "Asia/Shanghai",
-        "--as", "user"
-    ])
+    ]
+    if COACH_FOLDER_TOKEN:
+        copy_args.extend(["--folder-token", COACH_FOLDER_TOKEN])
+    stdout, stderr = run_lark(copy_args)
 
     if stderr:
         fail("base-copy", f"Failed to copy bitable: {stderr}")
@@ -216,13 +219,13 @@ def main():
         fail("base-copy", f"Cannot parse base-copy response: {stdout[:200]}")
 
     # ── 5. Get table IDs (retry — base copy may still be in progress) ────
+    # NOTE: Do NOT use --as user here either.
     table_ids = {}
     table_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         stdout, stderr = run_lark([
             "base", "+table-list",
-            "--base-token", new_token,
-            "--as", "user"
+            "--base-token", new_token
         ])
         table_err = stderr
         if not stderr:
@@ -249,7 +252,70 @@ def main():
     if not table_ids:
         fail("table-list", "No tables found in copied bitable")
 
-    # ── 6. Update group_map.json ─────────────────────────────────────────
+    # ── 6. Share bitable with coach and group chat ──────────────────
+    group_map, _ = load_group_map()
+    coach_uid = group_map.get("_config", {}).get("coach_openid", "") or group_map.get("_config", {}).get("coach_user_id", "")
+    if new_token:
+        try:
+            import urllib.request
+            share_base_url = (
+                f"https://open.feishu.cn/open-apis/drive/v1/permissions"
+                f"/{new_token}/members?type=bitable"
+            )
+            # Get tenant_access_token
+            token_req = urllib.request.Request(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                data=json.dumps({
+                    "app_id": os.environ.get("FEISHU_APP_ID", ""),
+                    "app_secret": os.environ.get("FEISHU_APP_SECRET", "")
+                }).encode(),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(token_req, timeout=30) as tr:
+                t_res = json.loads(tr.read())
+                access_token = t_res["tenant_access_token"]
+
+            # 6a. Share with coach (openid)
+            if coach_uid:
+                coach_body = json.dumps({
+                    "member_type": "openid",
+                    "member_id": coach_uid,
+                    "perm": "full_access"
+                }).encode()
+                req = urllib.request.Request(
+                    share_base_url, data=coach_body, method="POST",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    share_result = json.loads(resp.read())
+                    if share_result.get("code") != 0:
+                        print(f"  [warn] share to coach failed: {share_result.get('msg')}", file=sys.stderr)
+
+            # 6b. Share with group chat (openchat) — makes doc visible in group's "Cloud Docs" tab
+            if chat_id.startswith("oc_"):
+                chat_body = json.dumps({
+                    "member_type": "openchat",
+                    "member_id": chat_id,
+                    "perm": "full_access"
+                }).encode()
+                req = urllib.request.Request(
+                    share_base_url, data=chat_body, method="POST",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    share_result = json.loads(resp.read())
+                    if share_result.get("code") != 0:
+                        print(f"  [warn] share to group failed: {share_result.get('msg')}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [warn] auto-share error: {e}", file=sys.stderr)
+
+    # ── 7. Update group_map.json ─────────────────────────────────────
     group_map, _ = load_group_map()
 
     group_map[chat_id] = {
@@ -269,6 +335,7 @@ def main():
     save_group_map(group_map)
 
     # ── 7. Output result ─────────────────────────────────────────────────
+    bitable_url = f"https://pcn66xx6g0i0.feishu.cn/base/{new_token}"
     result = {
         "ok": True,
         "member_id": member_id,
@@ -280,7 +347,8 @@ def main():
         "style": style,
         "meals": meals,
         "reminder_freq": reminder_freq,
-        "weight_reminder": weight_reminder
+        "weight_reminder": weight_reminder,
+        "bitable_url": bitable_url
     }
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     print()
